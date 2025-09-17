@@ -166,10 +166,10 @@ const Chatbot: React.FC = () => {
                 headers: {
                     "Content-Type": "application/json",
                     // this is docter's token
-                    // Authorization: `Bearer testtt`, // Use environment variable for API key
+                    Authorization: `Bearer testtt`, // Use environment variable for API key
 
                     // below is the token of patient
-                    Authorization: `Bearer dIaf7RZ4bk74lXb0Jm4Uhq:APA91bGO8uuX1oXROYTuUOnTj8bPfvtWS7tgokL2kNOYkot8yf1gULsC3CD5X56zDTdrnMg14r9o7A5BVMJfkPXZ3X8BhO2WyKGmGhU6O8TxUYP6VAes2aY`, // Use environment variable for API key
+                    //Authorization: `Bearer cA5yeQGBJ0jtrOd9OY9cUE:APA91bHxJwsailj3LabcsYBGwCXMD3v4tp4kthlabzXn32G-WVmNHZWxs5BeN7USWHnMrlGib-mzfOSmpX4LEOlxTzJNXonfvZFerZzc4FJ9wGIkkbia1tk`, // Use environment variable for API key
                 },
                 body: JSON.stringify({
                     query: query,

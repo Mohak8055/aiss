@@ -1,60 +1,65 @@
-from typing import Optional, Dict, Any
-from datetime import datetime
+from dal.database import get_db_manager
 from langchain.tools import BaseTool
-from dal.database import DatabaseManager
+from typing import Dict, Any, Optional
+from services.user_service import get_user_context
 
 class FoodlogTool(BaseTool):
-    """
-    Tool for querying food log records for a patient. Returns the latest food log entries for a patient by name or ID, with optional date filtering and result limit.
-    """
-    name: str = "get_foodlog"
-    description: str = (
-        "Get the latest food log records for a patient. "
-        "You can filter by patient name or ID, set a date filter (YYYY-MM-DD), and limit the number of results (default 10). "
-        "Returns a list of food log entries with type, description, activity date, and other details."
-    )
+    name = "get_foodlog"
+    description = "Useful for getting food log entries for a patient, with optional date filtering. Always provide patient_identifier unless user is asking about their own data. For example, if the user asks 'what did I eat yesterday', do not provide patient_identifier."
+    user_context: Optional[Dict[str, Any]] = None
 
-    def __init__(self):
-        super().__init__()
-        # Don't set user_context as instance variable to avoid Pydantic validation issues
-    
-    def set_user_context(self, user_context):
+    def set_user_context(self, user_context: Dict[str, Any]):
         """Set user context for role-based access control"""
-        # Use object.__setattr__ to bypass Pydantic validation
-        object.__setattr__(self, 'user_context', user_context)
+        self.user_context = user_context
 
-    def _run(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-            date_filter: Optional[str] = None, limit: int = 10) -> Dict[str, Any]:
+    def _run(
+        self,
+        patient_identifier: Optional[str] = None,
+        date_filter: Optional[str] = None,
+        limit: int = 10
+    ) -> str:
         """
-        Query food log records for a patient with role-based access control.
-        Args:
-            patient_id (int, optional): Patient ID.
-            patient_name (str, optional): Patient name.
-            date_filter (str, optional): Date filter in YYYY-MM-DD format.
-            limit (int, optional): Max number of records to return.
-        Returns:
-            dict: Food log records and metadata.
+        Get food log entries for a patient.
         """
-        # Enforce role-based access control
-        user_context = getattr(self, "user_context", None)
-        if user_context and user_context.get('role_id') == 1:  # Patient role
-            # Patients can only access their own food logs
-            patient_id = user_context.get('user_id')
-            patient_name = None  # Override any patient_name to enforce access control
-        elif patient_id is None and patient_name is None:
-            # For medical staff, if no patient specified, this might be an error
-            return {"error": "Please specify a patient ID or patient name for the food log query."}
-        
-        date_obj = None
-        if date_filter:
-            try:
-                date_obj = datetime.strptime(date_filter, "%Y-%m-%d")
-            except Exception:
-                return {"error": "Invalid date_filter format. Use YYYY-MM-DD."}
-        with DatabaseManager() as db_manager:
-            return db_manager.get_foodlog(
-                patient_id=patient_id,
-                patient_name=patient_name,
-                date_filter=date_obj,
-                limit=limit
+        # If no patient_identifier is provided, check user context (for patient role)
+        if not patient_identifier and self.user_context and self.user_context.get('role_id') == 1:
+            patient_identifier = str(self.user_context.get('user_id'))
+
+        db_manager = get_db_manager()
+        foodlog_entries = db_manager.get_foodlog(
+            patient_identifier=patient_identifier,
+            date_filter=date_filter,
+            limit=limit
+        )
+
+        if not foodlog_entries:
+            return "No food log entries found."
+
+        response = ""
+        for entry in foodlog_entries:
+            response += f"Patient: {entry['patient_name']}\n"
+            response += f"Date: {entry['entry_datetime']}\n"
+            response += f"Type: {entry['food_type']}\n"
+            response += f"Description: {entry['description']}\n"
+            response += f"Activity: {entry['activity']}\n"
+            # Check if an image URL exists and add it to the response
+            if entry.get('image_url'):
+                response += f"Image URL: {entry['image_url']}\n"
+            response += "---\n"
+
+        return response
+
+    async def _arun(
+        self,
+        patient_identifier: Optional[str] = None,
+        date_filter: Optional[str] = None,
+        limit: int = 10
+    ) -> str:
+        """
+        Asynchronously get food log entries for a patient.
+        """
+        return self._run(
+            patient_identifier=patient_identifier,
+            date_filter=date_filter,
+            limit=limit
         )

@@ -8,67 +8,47 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime
 from sqlalchemy.orm import Session
 
-from .base_service import BaseService
-
-logger = logging.getLogger(__name__)
+from dal.models.foodlog import Foodlog
+from dal.models.users import Users
+from dal.services.base_service import BaseService
+from sqlalchemy.orm import Session
+from typing import List, Dict, Any, Optional
+from datetime import datetime
 
 class FoodlogService(BaseService):
-    """Service for handling food log operations"""
-    
     def __init__(self, db_session: Session):
         super().__init__(db_session)
-    
-    def get_foodlog(self, patient_id: Optional[int] = None, patient_name: Optional[str] = None,
-                   date_filter: Optional[datetime] = None, limit: int = 10) -> Dict[str, Any]:
-        """Get food log records for a patient"""
-        try:
-            from ..models.foodlog import Foodlog
-            
-            # Find patient ID
-            patient_id = self.find_patient_by_name_or_id(patient_id, patient_name)
-            if not patient_id:
-                return {"error": "Patient not found"}
-            
-            # Get active foodlog records (status = 1)
-            query = self.db.query(Foodlog).filter(
-                Foodlog.patient_id == patient_id,
-                Foodlog.status == 1
-            )
-            
-            # Apply date filter if provided (on createdon)
-            if date_filter:
-                query = query.filter(Foodlog.createdon >= date_filter)
-            
-            # Order by createdon descending and limit results
-            query = query.order_by(Foodlog.createdon.desc()).limit(limit)
-            foodlogs = query.all()
-            
-            # Convert to dict
-            foodlog_list = []
-            for log in foodlogs:
-                log_dict = {
-                    "id": log.id,
-                    "type": log.type,
-                    "url": log.url,
-                    "activitydate": log.activitydate,
-                    "createdon": log.createdon.isoformat() if log.createdon is not None else None,
-                    "createdby": log.createdby,
-                    "description": log.description,
-                    "status": log.status,
-                    "latitude": log.latitude,
-                    "longitude": log.longitude
-                }
-                foodlog_list.append(log_dict)
-            
-            return {
-                "patient_id": patient_id,
-                "foodlog": foodlog_list,
-                "count": len(foodlog_list),
-                "limit_applied": limit,
-                "date_filter": date_filter.isoformat() if date_filter else None,
-                "message": f"Showing top {len(foodlog_list)} latest foodlog records" + (f" from {date_filter.strftime('%Y-%m-%d')}" if date_filter else "")
+
+    def get_foodlog(self, patient_identifier: Optional[str] = None, date_filter: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+        query = self.db_session.query(
+            Foodlog.entry_datetime,
+            Foodlog.food_type,
+            Foodlog.description,
+            Foodlog.activity,
+            Foodlog.image_url,  # Add this line
+            Users.name.label("patient_name")
+        ).join(Users, Foodlog.patient_id == Users.id)
+
+        if patient_identifier:
+            query = query.filter(Users.name.ilike(f"%{patient_identifier}%"))
+
+        if date_filter:
+            try:
+                filter_date = datetime.strptime(date_filter, "%Y-%m-%d").date()
+                query = query.filter(Foodlog.entry_datetime >= filter_date)
+            except ValueError:
+                pass  # Handle invalid date format if necessary
+
+        results = query.order_by(Foodlog.entry_datetime.desc()).limit(limit).all()
+
+        return [
+            {
+                "entry_datetime": result.entry_datetime.strftime("%Y-%m-%d %H:%M:%S"),
+                "food_type": result.food_type,
+                "description": result.description,
+                "activity": result.activity,
+                "image_url": result.image_url,  # Add this line
+                "patient_name": result.patient_name,
             }
-            
-        except Exception as e:
-            logger.error(f"Error getting foodlog: {e}")
-            return {"error": f"Database error: {str(e)}"}
+            for result in results
+        ]

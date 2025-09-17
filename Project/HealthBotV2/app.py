@@ -14,20 +14,17 @@ from dotenv import load_dotenv
 # Load environment variables
 load_dotenv()
 
-# Set OpenAI API key from environment
-os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY", "")
-
 # LangChain imports
 try:
     from langchain.agents import create_openai_tools_agent, AgentExecutor
-    from langchain_openai import ChatOpenAI
+    from langchain_community.chat_models import ChatOllama
     from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
     from langchain.schema import HumanMessage, AIMessage
     LANGCHAIN_AVAILABLE = True
 except ImportError as e:
     LANGCHAIN_AVAILABLE = False
     print(f"LangChain not available: {e}")
-    print("Install with: pip install langchain langchain-openai")
+    print("Install with: pip install langchain langchain-community")
 
 # Import medical system components
 try:
@@ -48,13 +45,6 @@ async def lifespan(app: FastAPI):
     logger.info("🔧 Starting Revival Medical System initialization...")
     
     try:
-        # Check OpenAI API key
-        openai_api_key = os.getenv("OPENAI_API_KEY")
-        if openai_api_key:
-            logger.info("✅ OpenAI API key found")
-        else:
-            logger.warning("❌ OpenAI API key not found")
-        
         # Initialize database
         if init_database:
             try:
@@ -68,7 +58,7 @@ async def lifespan(app: FastAPI):
         # Summary
         logger.info("🚀 Revival Medical System API started successfully!")
         logger.info(f"📊 Component Status:")
-        logger.info(f"   - OpenAI: {'✅' if openai_api_key else '❌'}")
+        logger.info(f"   - LLM: Llama3 (via Ollama)")
         logger.info(f"   - Database: {'✅' if init_database else '❌'}")
         logger.info(f"   - LangChain: {'✅' if LANGCHAIN_AVAILABLE else '❌'}")
         logger.info(f"   - MCP: {'✅' if MCP_AVAILABLE else '❌'}")

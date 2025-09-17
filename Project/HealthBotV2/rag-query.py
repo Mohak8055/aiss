@@ -1,13 +1,15 @@
 import os
 from dotenv import load_dotenv
-from lib.openai_utils import  create_embeddings, chat_completion, SYSTEM_MESSAGES, normalize_embedding_vector
-from lib.pinecone_utils import  query_pinecone, get_pinecone_index
+from lib.openai_utils import create_embeddings, normalize_embedding_vector
+from lib.pinecone_utils import query_pinecone
+from langchain_community.chat_models import ChatOllama
+from langchain.schema import HumanMessage
 
 # Load environment variables from .env file
 load_dotenv()
 
 # Initialize utilities (clients will be created on first use)
-print("Initializing OpenAI and Pinecone utilities...")
+print("Initializing Ollama and Pinecone utilities...")
 
 # Get index name from environment
 index_name = os.getenv('INDEX_NAME')
@@ -33,7 +35,7 @@ def retrieve_documents_from_pinecone(query, top_k=5):
         
         # Query Pinecone using utility function
         results = query_pinecone(
-            vector=embedding_vector,  # type: ignore - we've validated this is List[float]
+            vector=embedding_vector,
             top_k=top_k,
             include_metadata=True,
             index_name=index_name
@@ -51,20 +53,16 @@ def retrieve_documents_from_pinecone(query, top_k=5):
 
 # Function to generate response using retrieved context
 def generate_response(context, user_query):
-    """Generate response using OpenAI chat completion utility"""
+    """Generate response using Ollama chat completion"""
     try:
         prompt = f"{context}\n\nUser query: {user_query}"
         
-        # Use chat completion utility with predefined system message
-        response = chat_completion(
-            prompt=prompt,
-            system_message=SYSTEM_MESSAGES["rag_assistant"],
-            model="gpt-3.5-turbo",
-            max_tokens=150
-        )
+        # Use Ollama for chat completion
+        llm = ChatOllama(model="llava")
+        response = llm.invoke([HumanMessage(content=prompt)])
         
-        if response:
-            return response.strip()
+        if response and response.content:
+            return response.content.strip()
         else:
             return "❌ No response generated"
             
