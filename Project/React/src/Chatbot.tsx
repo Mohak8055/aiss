@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 
-// Extend Window interface for Speech Recognition
+// Extend Window interface for potential browser APIs
 declare global {
     interface Window {
         SpeechRecognition: any;
@@ -9,30 +9,53 @@ declare global {
     }
 }
 
+/**
+ * Chatbot component for the Revival365 web application.
+ *
+ * This component implements both text and voice interactions.  In addition
+ * to the upstream functionality it introduces a microphone button that
+ * offers two voice modes: 'Regional' and 'International'.  When the user
+ * selects one of these modes the component records audio using the
+ * MediaRecorder API, encodes the recording as a base64 data URL and sends
+ * it to the backend `/api/chat/voice` endpoint along with the selected
+ * language hint.  The server transcribes and translates the audio as
+ * necessary before generating a response from the LangChain agent.
+ */
 const Chatbot: React.FC = () => {
-    const [isOpen, setIsOpen] = useState<boolean>(false); // Toggle chatbot visibility
-    const [userQuery, setUserQuery] = useState<string>(""); // User's input
-    const [chatHistory, setChatHistory] = useState<{ role: "user" | "bot"; message: string; metadata?: any }[]>([
+    // Toggle chatbot visibility
+    const [isOpen, setIsOpen] = useState<boolean>(false);
+    // User's text input
+    const [userQuery, setUserQuery] = useState<string>("");
+    // Chat history (user and bot messages)
+    const [chatHistory, setChatHistory] = useState<
+        { role: "user" | "bot"; message: string; metadata?: any }[]
+    >([
         {
             role: "bot",
             message:
                 "Hello! I am your Revival365 AI Assistant. How can I help you today? You want know your records, CGM values,  medication schedules with dates ",
         },
-    ]); // Chat history
-    const [isLoading, setIsLoading] = useState<boolean>(false); // Loading state
-    const [isListening, setIsListening] = useState<boolean>(false); // Voice recognition state
-    const [sessionId, setSessionId] = useState<string>(""); // Session ID
-    const recognitionRef = useRef<any>(null);
+    ]);
+    // Loading state for API requests
+    const [isLoading, setIsLoading] = useState<boolean>(false);
+    // Session ID to persist conversation context
+    const [sessionId, setSessionId] = useState<string>("");
+
+    // Voice recording state
+    const [showMicOptions, setShowMicOptions] = useState<boolean>(false);
+    const [isRecording, setIsRecording] = useState<boolean>(false);
+    const [selectedLanguage, setSelectedLanguage] = useState<"regional" | "international" | null>(null);
+    const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+    const audioChunksRef = useRef<Blob[]>([]);
+
     const chatEndRef = useRef<HTMLDivElement | null>(null);
 
-    // Generate or retrieve session ID
+    // Generate a pseudo‑random session ID (8 digits)
     const generateSessionId = () => {
         return Math.floor(Math.random() * 99999999).toString();
     };
 
-    useEffect(() => {});
-
-    // Initialize session ID
+    // Initialize session ID on mount
     useEffect(() => {
         let storedSessionId = sessionStorage.getItem("chatbot_session_id");
         if (!storedSessionId) {
@@ -51,7 +74,7 @@ const Chatbot: React.FC = () => {
         "Steps to Pair the Band on Android",
     ];
 
-    // Custom components for ReactMarkdown
+    // Custom components for ReactMarkdown to style various Markdown elements
     const markdownComponents = {
         h1: ({ children }: any) => <h1 className="text-2xl font-bold mt-4 mb-3">{children}</h1>,
         h2: ({ children }: any) => <h2 className="text-xl font-bold mt-4 mb-3">{children}</h2>,
@@ -100,53 +123,9 @@ const Chatbot: React.FC = () => {
         }
     }, [chatHistory, isLoading]);
 
-    // Initialize Speech Recognition
-    useEffect(() => {
-        if ("webkitSpeechRecognition" in window || "SpeechRecognition" in window) {
-            const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-            recognitionRef.current = new SpeechRecognition();
-            recognitionRef.current.continuous = false;
-            recognitionRef.current.interimResults = false;
-            recognitionRef.current.lang = "en-US";
-
-            recognitionRef.current.onresult = (event: any) => {
-                const transcript = event.results[0][0].transcript;
-                handleSendMessage(transcript);
-                //setUserQuery(transcript);
-                setIsListening(false);
-            };
-
-            recognitionRef.current.onerror = (event: any) => {
-                console.error("Speech recognition error:", event.error);
-                setIsListening(false);
-            };
-
-            recognitionRef.current.onend = () => {
-                setIsListening(false);
-            };
-        }
-
-        return () => {
-            if (recognitionRef.current) {
-                recognitionRef.current.stop();
-            }
-        };
-    }, []);
-
-    const startListening = () => {
-        if (recognitionRef.current && !isListening) {
-            setIsListening(true);
-            recognitionRef.current.start();
-        }
-    };
-
-    const stopListening = () => {
-        if (recognitionRef.current && isListening) {
-            recognitionRef.current.stop();
-            setIsListening(false);
-        }
-    };
-
+    /**
+     * Send a text query to the server and update the chat history.
+     */
     const handleSendMessage = async (message?: string) => {
         const query = message || userQuery;
         if (!query.trim()) {
@@ -159,59 +138,165 @@ const Chatbot: React.FC = () => {
         setIsLoading(true);
 
         try {
-            // Call the enhanced query API
-            //const response = await fetch("http://13.200.229.28:8000/api/chat/query", {
-                const response = await fetch("/api/chat/query", {
+            const response = await fetch("/api/chat/query", {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    // this is docter's token
-                    Authorization: `Bearer testtt`, // Use environment variable for API key
-
-                    // below is the token of patient
-                    //Authorization: `Bearer cA5yeQGBJ0jtrOd9OY9cUE:APA91bHxJwsailj3LabcsYBGwCXMD3v4tp4kthlabzXn32G-WVmNHZWxs5BeN7USWHnMrlGib-mzfOSmpX4LEOlxTzJNXonfvZFerZzc4FJ9wGIkkbia1tk`, // Use environment variable for API key
+                    // Use doctor token for now; in a real app this should come from auth context
+                    Authorization: `Bearer testtt`,
                 },
                 body: JSON.stringify({
                     query: query,
                     sessionId: sessionId,
                 }),
             });
-
             if (!response.ok) {
                 throw new Error("Failed to fetch response from the server.");
             }
-
             const data = await response.json();
-
-            // Add bot's response with metadata to chat history
             const botMessage = data.response;
             const metadata = data.metadata;
-
-            // Add visual indicators based on query type
-            let messagePrefix = "";
-            // if (metadata?.used_mcp) {
-            //     messagePrefix = "📊 **Real-time Data**: ";
-            // } else if (metadata?.query_type === "rag") {
-            //     messagePrefix = "📚 **From Handbook**: ";
-            // }
-
+            // Optionally prefix the bot message based on metadata; omitted here for clarity
             setChatHistory((prev) => [
                 ...prev,
                 {
                     role: "bot",
-                    message: messagePrefix + botMessage,
+                    message: botMessage,
                     metadata: metadata,
                 },
             ]);
         } catch (error) {
             console.error("Error:", error);
-            setChatHistory((prev) => [...prev, { role: "bot", message: "Something went wrong. Please try again." }]);
+            setChatHistory((prev) => [
+                ...prev,
+                { role: "bot", message: "Something went wrong. Please try again." },
+            ]);
         } finally {
             setIsLoading(false);
             setUserQuery(""); // Clear input field
         }
     };
 
+    /**
+     * Toggle the microphone button behaviour.  When not recording this will
+     * display the language selection menu.  When recording it will stop
+     * the current recording.
+     */
+    const handleMicButtonClick = () => {
+        if (isRecording) {
+            stopRecording();
+        } else {
+            setShowMicOptions((prev) => !prev);
+        }
+    };
+
+    /**
+     * Start recording audio and set the selected language.  Hides the
+     * language selection menu and begins capturing microphone input.
+     */
+    const startRecording = async (language: "regional" | "international") => {
+        setSelectedLanguage(language);
+        setShowMicOptions(false);
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            const mediaRecorder = new MediaRecorder(stream);
+            mediaRecorderRef.current = mediaRecorder;
+            audioChunksRef.current = [];
+            mediaRecorder.ondataavailable = (event: BlobEvent) => {
+                if (event.data && event.data.size > 0) {
+                    audioChunksRef.current.push(event.data);
+                }
+            };
+            mediaRecorder.onstop = async () => {
+                const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+                const reader = new FileReader();
+                reader.onloadend = async () => {
+                    const base64String = reader.result?.toString() || "";
+                    await sendVoiceMessage(base64String, language);
+                };
+                reader.readAsDataURL(audioBlob);
+            };
+            mediaRecorder.start();
+            setIsRecording(true);
+        } catch (error) {
+            console.error("Error accessing microphone:", error);
+        }
+    };
+
+    /**
+     * Stop the current recording if one is in progress.
+     */
+    const stopRecording = () => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+            mediaRecorderRef.current.stop();
+            setIsRecording(false);
+        }
+    };
+
+    /**
+     * Send a voice message to the backend API.  The message is represented as
+     * a base64 encoded audio data URL along with the language hint.  The
+     * server returns a bot response which is appended to the chat history.
+     */
+    /**
+     * Send a voice message to the backend API. The message is represented as
+     * a base64-encoded audio string (no data URL prefix) plus a language hint.
+     */
+    const sendVoiceMessage = async (base64Audio: string, language: "regional" | "international") => {
+        // show a placeholder so the user sees we sent voice
+        setChatHistory((prev) => [
+            ...prev,
+            { role: "user", message: "(Voice message sent)", metadata: { voice: true, language } },
+        ]);
+        setIsLoading(true);
+
+        try {
+            // Strip "data:audio/...;base64," prefix if present
+            const audioBase64 = base64Audio.includes(",") ? base64Audio.split(",")[1] : base64Audio;
+
+            const response = await fetch("/api/chat/voice", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer testtt`,
+                },
+                body: JSON.stringify({
+                    audioBase64,                // ✅ expected key
+                    language,                   // "regional" | "international"
+                    sessionId: sessionId ?? "", // ✅ keep your session continuity
+                    // patientId: 123            // (optional) if you use it later
+                }),
+            });
+
+            if (!response.ok) {
+                const errText = await response.text().catch(() => "");
+                throw new Error(`Failed to fetch voice response from the server. ${errText}`);
+            }
+
+            const data = await response.json();
+            const botMessage = data.response;
+            const metadata = data.metadata;
+
+            setChatHistory((prev) => [
+                ...prev,
+                {
+                    role: "bot",
+                    message: botMessage,
+                    metadata: metadata,
+                },
+            ]);
+        } catch (error) {
+            console.error(error);
+            setChatHistory((prev) => [...prev, { role: "bot", message: "Something went wrong. Please try again." }]);
+        } finally {
+            setIsLoading(false);
+        }
+    };
+
+
+    /**
+     * Handle keyboard events on the text input (e.g. press Enter to send).
+     */
     const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === "Enter" && !isLoading) {
             handleSendMessage();
@@ -324,26 +409,43 @@ const Chatbot: React.FC = () => {
                     </div>
 
                     {/* Input Area */}
-                    <div className="flex border-t border-gray-300 bg-white p-3">
+                    <div className="flex border-t border-gray-300 bg-white p-3 relative">
                         <input
                             type="text"
                             value={userQuery}
                             onChange={(e) => setUserQuery(e.target.value)}
-                            onKeyDown={handleKeyDown} // Handle Enter key
+                            onKeyDown={handleKeyDown}
                             placeholder="Type your question or use the microphone..."
                             className="rounded pr-20 flex-1 border border-gray-300 p-2 focus:outline-none focus:ring focus:ring-blue-300"
-                            disabled={isLoading}
+                            disabled={isLoading || isRecording}
                         />
+                        {/* Microphone Options Menu */}
+                        {showMicOptions && !isRecording && (
+                            <div className="absolute bottom-14 right-20 z-50 bg-white border border-gray-300 rounded shadow-lg">
+                                <button
+                                    onClick={() => startRecording("regional")}
+                                    className="block w-full px-4 py-2 text-left hover:bg-gray-100"
+                                >
+                                    Regional
+                                </button>
+                                <button
+                                    onClick={() => startRecording("international")}
+                                    className="block w-full px-4 py-2 text-left hover:bg-gray-100"
+                                >
+                                    International
+                                </button>
+                            </div>
+                        )}
                         {/* Microphone Button */}
                         <button
-                            onClick={isListening ? stopListening : startListening}
+                            onClick={handleMicButtonClick}
                             className={`rounded -ml-16 pr-2 py-2 ${
-                                isListening ? "text-red-500 hover:text-red-600" : "text-gray-600 hover:text-gray-800"
+                                isRecording ? "text-red-500 hover:text-red-600" : "text-gray-600 hover:text-gray-800"
                             } disabled:text-gray-400`}
                             disabled={isLoading}
-                            title={isListening ? "Stop listening" : "Start voice input"}
+                            title={isRecording ? "Stop recording" : "Start voice input"}
                         >
-                            {isListening ? (
+                            {isRecording ? (
                                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" className="inline-block">
                                     <circle cx="12" cy="12" r="8" opacity="0.3">
                                         <animate attributeName="r" values="8;12;8" dur="1.5s" repeatCount="indefinite" />
