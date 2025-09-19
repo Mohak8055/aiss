@@ -50,7 +50,22 @@ const Chatbot: React.FC = () => {
 
     const chatEndRef = useRef<HTMLDivElement | null>(null);
 
-    // Generate a pseudo‑random session ID (8 digits)
+    // 🔊 Audio / silence detection refs (NEW)
+    const streamRef = useRef<MediaStream | null>(null);
+    const audioCtxRef = useRef<AudioContext | null>(null);
+    const analyserRef = useRef<AnalyserNode | null>(null);
+    const silenceTimerRef = useRef<number | null>(null);
+    const recordingStartedAtRef = useRef<number>(0);
+    const lastSpeechAtRef = useRef<number>(0);
+    const speechDetectedRef = useRef<boolean>(false);
+
+    // Silence/VAD tuning (NEW)
+    const SILENCE_THRESHOLD = 0.02;            // lower = more sensitive
+    const INITIAL_SILENCE_TIMEOUT_MS = 5000;   // stop if no speech for first 5s
+    const SILENCE_AFTER_SPEECH_MS = 1200;      // stop ~1.2s after speaker finishes
+    const ANALYZE_INTERVAL_MS = 100;           // check 10x/second
+
+    // Generate a pseudo-random session ID (8 digits)
     const generateSessionId = () => {
         return Math.floor(Math.random() * 99999999).toString();
     };
@@ -63,6 +78,15 @@ const Chatbot: React.FC = () => {
             sessionStorage.setItem("chatbot_session_id", storedSessionId);
         }
         setSessionId(storedSessionId);
+    }, []);
+
+    // Cleanup audio graph on unmount (NEW)
+    useEffect(() => {
+        return () => {
+            cleanupAudioGraph();
+            stopStreamTracks();
+        };
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     const predefinedQuestions = [
@@ -156,7 +180,6 @@ const Chatbot: React.FC = () => {
             const data = await response.json();
             const botMessage = data.response;
             const metadata = data.metadata;
-            // Optionally prefix the bot message based on metadata; omitted here for clarity
             setChatHistory((prev) => [
                 ...prev,
                 {
@@ -184,7 +207,7 @@ const Chatbot: React.FC = () => {
      */
     const handleMicButtonClick = () => {
         if (isRecording) {
-            stopRecording();
+            stopRecording(); // manual stop
         } else {
             setShowMicOptions((prev) => !prev);
         }
@@ -193,12 +216,15 @@ const Chatbot: React.FC = () => {
     /**
      * Start recording audio and set the selected language.  Hides the
      * language selection menu and begins capturing microphone input.
+     * Adds silence detection to auto-stop.
      */
     const startRecording = async (language: "regional" | "international") => {
         setSelectedLanguage(language);
         setShowMicOptions(false);
         try {
             const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            streamRef.current = stream;
+
             const mediaRecorder = new MediaRecorder(stream);
             mediaRecorderRef.current = mediaRecorder;
             audioChunksRef.current = [];
@@ -208,16 +234,30 @@ const Chatbot: React.FC = () => {
                 }
             };
             mediaRecorder.onstop = async () => {
-                const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-                const reader = new FileReader();
-                reader.onloadend = async () => {
-                    const base64String = reader.result?.toString() || "";
-                    await sendVoiceMessage(base64String, language);
-                };
-                reader.readAsDataURL(audioBlob);
+                try {
+                    const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+                    const reader = new FileReader();
+                    reader.onloadend = async () => {
+                        const base64String = reader.result?.toString() || "";
+                        await sendVoiceMessage(base64String, language);
+                    };
+                    reader.readAsDataURL(audioBlob);
+                } catch (e) {
+                    console.error("Finalize voice error:", e);
+                    setChatHistory((prev) => [
+                        ...prev,
+                        { role: "bot", message: "Something went wrong. Please try again." },
+                    ]);
+                } finally {
+                    stopStreamTracks();
+                }
             };
+
             mediaRecorder.start();
             setIsRecording(true);
+
+            // Start silence detection (NEW)
+            startSilenceDetection(stream);
         } catch (error) {
             console.error("Error accessing microphone:", error);
         }
@@ -227,27 +267,126 @@ const Chatbot: React.FC = () => {
      * Stop the current recording if one is in progress.
      */
     const stopRecording = () => {
-        if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-            mediaRecorderRef.current.stop();
-            setIsRecording(false);
-        }
+        try {
+            if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
+                mediaRecorderRef.current.stop();
+            }
+        } catch {}
+        setIsRecording(false);
+        cleanupAudioGraph(); // stop silence detection & close AudioContext (NEW)
     };
+
+    const stopStreamTracks = () => {
+        try {
+            streamRef.current?.getTracks().forEach((t) => t.stop());
+        } catch {}
+        streamRef.current = null;
+    };
+
+    // ---- Silence Detection (NEW) ----
+    const startSilenceDetection = (stream: MediaStream) => {
+        cleanupAudioGraph();
+
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+        const source = audioCtx.createMediaStreamSource(stream);
+        const analyser = audioCtx.createAnalyser();
+        analyser.fftSize = 1024;
+
+        source.connect(analyser);
+
+        audioCtxRef.current = audioCtx;
+        analyserRef.current = analyser;
+
+        recordingStartedAtRef.current = Date.now();
+        lastSpeechAtRef.current = Date.now();
+        speechDetectedRef.current = false;
+
+        const buffer = new Float32Array(analyser.fftSize);
+
+        const check = () => {
+            if (!analyserRef.current) return;
+
+            analyserRef.current.getFloatTimeDomainData(buffer);
+            // Compute RMS
+            let sum = 0;
+            for (let i = 0; i < buffer.length; i++) {
+                const x = buffer[i];
+                sum += x * x;
+            }
+            const rms = Math.sqrt(sum / buffer.length);
+
+            const now = Date.now();
+
+            if (rms > SILENCE_THRESHOLD) {
+                // speech present
+                speechDetectedRef.current = true;
+                lastSpeechAtRef.current = now;
+            }
+
+            // Initial no-speech timeout
+            if (!speechDetectedRef.current) {
+                if (now - recordingStartedAtRef.current > INITIAL_SILENCE_TIMEOUT_MS) {
+                    stopRecording();
+                    return;
+                }
+            } else {
+                // After speech, stop when silent for SILENCE_AFTER_SPEECH_MS
+                if (now - lastSpeechAtRef.current > SILENCE_AFTER_SPEECH_MS) {
+                    stopRecording();
+                    return;
+                }
+            }
+        };
+
+        silenceTimerRef.current = window.setInterval(check, ANALYZE_INTERVAL_MS);
+    };
+
+    const cleanupAudioGraph = () => {
+        if (silenceTimerRef.current) {
+            window.clearInterval(silenceTimerRef.current);
+            silenceTimerRef.current = null;
+        }
+        try {
+            audioCtxRef.current?.close();
+        } catch {}
+        audioCtxRef.current = null;
+        analyserRef.current = null;
+    };
+    // ---- End Silence Detection ----
+
+    // Helper to decide which text to show as the user's question after voice
+    function pickDisplayedTranscript(
+        data: any,
+        lang: "regional" | "international" | null
+    ): string {
+        const meta = data?.metadata || {};
+        const candidates: string[] = [
+            data?.translatedTranscript,
+            data?.translation,
+            meta?.translatedTranscript,
+            meta?.translation,
+        ].filter(Boolean);
+
+        if (lang === "international") {
+            const translated = candidates.find(Boolean);
+            if (translated && typeof translated === "string") return translated.trim();
+            return (data?.transcript || meta?.transcript || "").trim();
+        }
+
+        return (
+            (candidates.find(Boolean) as string | undefined) ||
+            data?.transcript ||
+            meta?.transcript ||
+            ""
+        ).trim();
+    }
 
     /**
      * Send a voice message to the backend API.  The message is represented as
-     * a base64 encoded audio data URL along with the language hint.  The
-     * server returns a bot response which is appended to the chat history.
-     */
-    /**
-     * Send a voice message to the backend API. The message is represented as
      * a base64-encoded audio string (no data URL prefix) plus a language hint.
+     * UI: show loader, then add transcribed/translated question as user bubble, then bot reply.
      */
     const sendVoiceMessage = async (base64Audio: string, language: "regional" | "international") => {
-        // show a placeholder so the user sees we sent voice
-        setChatHistory((prev) => [
-            ...prev,
-            { role: "user", message: "(Voice message sent)", metadata: { voice: true, language } },
-        ]);
         setIsLoading(true);
 
         try {
@@ -261,10 +400,9 @@ const Chatbot: React.FC = () => {
                     Authorization: `Bearer testtt`,
                 },
                 body: JSON.stringify({
-                    audioBase64,                // ✅ expected key
+                    audioBase64,                // expected key
                     language,                   // "regional" | "international"
-                    sessionId: sessionId ?? "", // ✅ keep your session continuity
-                    // patientId: 123            // (optional) if you use it later
+                    sessionId: sessionId ?? "", // keep session continuity
                 }),
             });
 
@@ -277,6 +415,13 @@ const Chatbot: React.FC = () => {
             const botMessage = data.response;
             const metadata = data.metadata;
 
+            // Show the (translated, if available) question first
+            const displayedQuestion = pickDisplayedTranscript(data, language);
+            if (displayedQuestion) {
+                setChatHistory((prev) => [...prev, { role: "user", message: displayedQuestion }]);
+            }
+
+            // Then, show the bot's answer
             setChatHistory((prev) => [
                 ...prev,
                 {
@@ -292,7 +437,6 @@ const Chatbot: React.FC = () => {
             setIsLoading(false);
         }
     };
-
 
     /**
      * Handle keyboard events on the text input (e.g. press Enter to send).
@@ -455,7 +599,7 @@ const Chatbot: React.FC = () => {
                                         <animate attributeName="r" values="6;9;6" dur="1s" repeatCount="indefinite" />
                                         <animate attributeName="opacity" values="0.5;0.2;0.5" dur="1s" repeatCount="indefinite" />
                                     </circle>
-                                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c0 1.66 1.34 3 3 3z" />
+                                    <path d="M12 14c1.66 0 3-1.34 3-3V5c0-1.66-1.34-3-3-3S9 3.34 9 5v6c1.66 0 3 1.34 3 3z" />
                                     <path d="M17 11c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92V21h2v-3.08c3.39-.49 6-3.39 6-6.92h-2z" />
                                 </svg>
                             ) : (
