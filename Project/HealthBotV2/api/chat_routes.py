@@ -11,12 +11,14 @@ import tempfile
 import json
 import subprocess
 from typing import Dict, Any, Optional, Tuple
+import asyncio  # ✅ added for optional async initialize
 
 import requests
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel, Field, validator
 
-# === Original project imports (unchanged) ===
+# === Original project imports (unchanged interface) ===
+# Keep your original import path; the agent class name is the same.
 from agents import MedicalLangChainAgent
 from auth.auth import get_current_user, UserContext, get_authorized_patient_id
 
@@ -152,18 +154,35 @@ def _ensure_wav(audio_path: str) -> str:
 
 
 def get_or_create_session_agent(session_id: Optional[str] = None, openai_api_key: Optional[str] = None) -> tuple:
-    """Get existing session agent or create new one (unchanged)."""
+    """Get existing session agent or create new one (kept compatible with new/old agent signatures)."""
     global session_agents
     if not session_id:
         session_id = str(uuid.uuid4())
     if session_id not in session_agents:
         try:
-            session_agents[session_id] = MedicalLangChainAgent(openai_api_key=openai_api_key or '')
+            # ✅ Newer agent signature prefers user_context
+            try:
+                session_agents[session_id] = MedicalLangChainAgent(user_context={})
+            except TypeError:
+                # ↩️ Fallback for older builds that expected openai_api_key
+                session_agents[session_id] = MedicalLangChainAgent(openai_api_key=openai_api_key or '')
             logger.info(f"✅ Created new session agent for session: {session_id[:8]}...")
         except Exception as e:
             logger.error(f"❌ Failed to create session agent: {e}")
             return None, session_id
     return session_agents[session_id], session_id
+
+
+async def _maybe_initialize(agent: Any):
+    """Initialize agent if it exposes an async initialize() (keeps compatibility with older builds)."""
+    try:
+        init = getattr(agent, "initialize", None)
+        if callable(init):
+            res = init()
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception as e:
+        logger.error(f"Agent initialize() failed (continuing): {e}")
 
 
 def _transcribe_with_whisper(audio_bytes: bytes, mime: Optional[str]) -> str:
@@ -181,8 +200,8 @@ def _transcribe_with_whisper(audio_bytes: bytes, mime: Optional[str]) -> str:
         wav_path = _ensure_wav(input_path)
 
         # 3) Transcribe
-        model = whisper.load_model("small")  # better than base for quality; CPU fine (FP32)
-        result = model.transcribe(wav_path, fp16=False)  # force FP32 on CPU
+        model = whisper.load_model("small")  # use what you had
+        result = model.transcribe(wav_path, fp16=False)  # CPU safe
         text = (result or {}).get("text", "") or ""
         return text.strip()
     except Exception as e:
@@ -198,24 +217,19 @@ def _transcribe_translate_with_sarvam(audio_bytes: bytes, mime: Optional[str]) -
       Fallback to /speech-to-text if you want same-language transcription.
     """
     api_key = os.getenv("SARVAM_API_KEY", "sk_tjglfjfs_JtdOlwApFemE3fxJeZi9eckf").strip()
-    # Prefer translate endpoint (auto->English). Override via env if needed.
     sarvam_url = os.getenv("SARVAM_STT_URL", "https://api.sarvam.ai/speech-to-text-translate").strip()
     if not api_key:
         raise RuntimeError("SARVAM_API_KEY is not set in environment.")
 
     try:
         files = {
-            # Use a reasonable filename + the detected/assumed mime
             "file": ("audio" + (_guess_suffix_from_mime(mime) or ".wav"),
                      audio_bytes,
                      (mime or "application/octet-stream"))
         }
-
-        # Most cases: translation endpoint needs only the file + subscription key.
-        # If your account requires extra fields, add them here (e.g., model, diarization, etc.)
         resp = requests.post(
             sarvam_url,
-            headers={"api-subscription-key": api_key},   # <-- IMPORTANT
+            headers={"api-subscription-key": api_key},
             files=files,
             timeout=60,
         )
@@ -225,7 +239,6 @@ def _transcribe_translate_with_sarvam(audio_bytes: bytes, mime: Optional[str]) -
             resp.raise_for_status()
 
         payload = resp.json() if resp.content else {}
-        # Common keys used in docs/examples
         text = (payload.get("text")
                 or payload.get("transcript")
                 or payload.get("result")
@@ -279,6 +292,9 @@ async def handle_query(
 
         # Session agent
         session_agent, session_id = get_or_create_session_agent(session_id, os.getenv("OPENAI_API_KEY"))
+
+        # ✅ initialize if needed (keeps compatibility with new agent)
+        await _maybe_initialize(session_agent)
 
         try:
             if hasattr(session_agent, 'set_user_context'):
@@ -366,6 +382,9 @@ async def handle_voice_query(
 
         # 4) Session agent
         session_agent, session_id = get_or_create_session_agent(request.session_id, os.getenv("OPENAI_API_KEY"))
+
+        # ✅ initialize if needed (keeps compatibility with new agent)
+        await _maybe_initialize(session_agent)
 
         # 5) User context
         if hasattr(session_agent, 'set_user_context'):

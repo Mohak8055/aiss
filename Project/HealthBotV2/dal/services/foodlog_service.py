@@ -1,123 +1,100 @@
 #!/usr/bin/env python3
 """
-Food log service for handling food log and nutrition data.
-
-This service exposes a `get_foodlog` method that returns a list of food log
-entries for a given patient. It mirrors the upstream implementation but fixes
-an important bug: when the caller supplies a numeric patient identifier the
-original code would attempt to perform a case‑insensitive name search using
-`Users.name.ilike()`.  This caused the database layer to mix up numeric IDs
-with names and frequently returned incorrect patient data.  The updated
-implementation below inspects the `patient_identifier` parameter and if it
-contains only digits it filters directly on the primary key (`Users.id`).  If
-the identifier contains any non‑digit characters it falls back to the
-original behaviour of performing a `ILIKE` search on the patient name.
-
-The returned entries include the associated image URL so that consumers of
-this service can display images alongside other food log information.  If
-`date_filter` is supplied the entries are filtered on or after the given
-date.
+Food log service using Foodlog model (columns: type, url, activitydate, createdon, description).
+Adds optional filters meal_type and exact_date (YYYY-MM-DD or natural language handled in tool).
+Preserves old behavior when new params are omitted.
 """
 
 import logging
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
-
-from dal.models.foodlog import Foodlog
+from sqlalchemy import and_, or_
 from dal.models.users import Users
-from dal.services.base_service import BaseService
-
+from dal.models.foodlog import Foodlog
 
 logger = logging.getLogger(__name__)
 
-
-class FoodlogService(BaseService):
-    """Service class for accessing patient food log data."""
-
-    def __init__(self, db_session: Session):
-        super().__init__(db_session)
+class FoodlogService:
+    def __init__(self, db: Session):
+        self.db = db
 
     def get_foodlog(
         self,
         patient_identifier: Optional[str] = None,
         date_filter: Optional[str] = None,
         limit: int = 10,
+        meal_type: Optional[str] = None,
+        exact_date: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Retrieve food log entries for a patient.
+        """Return food log entries for a patient with optional filtering."""
+        q = self.db.query(Foodlog)
 
-        Parameters
-        ----------
-        patient_identifier: Optional[str]
-            The patient's identifier (either a numeric ID or a name substring).  If
-            omitted all patient entries are returned.
-        date_filter: Optional[str]
-            A date string in ``YYYY‑MM‑DD`` format.  Only entries on or after
-            this date will be returned.
-        limit: int
-            The maximum number of entries to return.  Defaults to 10.
-
-        Returns
-        -------
-        List[Dict[str, Any]]
-            A list of dictionaries containing the food log details.  Each
-            dictionary includes the entry timestamp, type, description,
-            associated activity, an image URL (if present) and the patient's
-            name.
-        """
-        query = self.db_session.query(
-            Foodlog.entry_datetime,
-            Foodlog.food_type,
-            Foodlog.description,
-            Foodlog.activity,
-            Foodlog.image_url,
-            Users.name.label("patient_name"),
-        ).join(Users, Foodlog.patient_id == Users.id)
-
-        # If a patient identifier is supplied, determine whether it's a numeric
-        # identifier (patient ID) or a string name.  Numeric IDs should filter
-        # directly on the primary key to avoid mixing patient data.
+        # Patient filtering (by id or name via join)
         if patient_identifier:
-            trimmed_identifier = patient_identifier.strip()
-            if trimmed_identifier.isdigit():
-                # Filter by patient ID when the identifier is purely numeric
+            trimmed = str(patient_identifier).strip()
+            if trimmed.isdigit():
                 try:
-                    patient_id = int(trimmed_identifier)
-                    query = query.filter(Users.id == patient_id)
+                    pid = int(trimmed)
+                    q = q.filter(Foodlog.patient_id == pid)
                 except ValueError:
-                    # Fall back to name search if conversion fails
-                    query = query.filter(Users.name.ilike(f"%{trimmed_identifier}%"))
+                    q = q.join(Users, Users.id == Foodlog.patient_id).filter(Users.name.ilike(f"%{trimmed}%"))
             else:
-                # Perform case‑insensitive search on the patient name
-                query = query.filter(Users.name.ilike(f"%{trimmed_identifier}%"))
+                q = q.join(Users, Users.id == Foodlog.patient_id).filter(Users.name.ilike(f"%{trimmed}%"))
 
-        # Apply a date filter if provided.  We allow invalid dates to silently
-        # fall through which mirrors the behaviour of the original service.
+        # Meal type filter (Foodlog.type)
+        if meal_type:
+            q = q.filter(Foodlog.type.ilike(meal_type.strip()))
+
+        # Exact date filter: prefer activitydate string, else compare createdon date part
+        if exact_date:
+            s = str(exact_date).strip()
+            try:
+                d = datetime.strptime(s, "%Y-%m-%d").date()
+                start_dt = datetime.combine(d, datetime.min.time())
+                end_dt = datetime.combine(d, datetime.max.time())
+                q = q.filter(
+                    or_(
+                        Foodlog.activitydate == d.strftime("%Y-%m-%d"),
+                        and_(Foodlog.createdon >= start_dt, Foodlog.createdon <= end_dt)
+                    )
+                )
+            except ValueError:
+                # If not ISO, compare against activitydate string directly
+                q = q.filter(or_(Foodlog.activitydate == s, Foodlog.activitydate.ilike(f"%{s}%")))
+
+        # On/after date filter
         if date_filter:
             try:
-                filter_date = datetime.strptime(date_filter, "%Y-%m-%d").date()
-                query = query.filter(Foodlog.entry_datetime >= filter_date)
+                d = datetime.strptime(date_filter, "%Y-%m-%d").date()
+                q = q.filter(or_(Foodlog.createdon >= d, Foodlog.activitydate >= d.strftime("%Y-%m-%d")))
             except ValueError:
-                logger.warning(
-                    "Invalid date_filter '%s' passed to get_foodlog; ignoring",
-                    date_filter,
-                )
+                logger.warning("Invalid date_filter '%s' passed to get_foodlog; ignoring", date_filter)
 
-        # Order entries by most recent first and limit the number returned
-        results = (
-            query.order_by(Foodlog.entry_datetime.desc()).limit(limit).all()
-        )
+        # Ordering: newest first
+        try:
+            q = q.order_by(Foodlog.createdon.desc())
+        except Exception:
+            q = q.order_by(Foodlog.id.desc())
 
-        return [
-            {
-                "entry_datetime": result.entry_datetime.strftime("%Y-%m-%d %H:%M:%S"),
-                "food_type": result.food_type,
-                "description": result.description,
-                "activity": result.activity,
-                "image_url": result.image_url,
-                "patient_name": result.patient_name,
+        rows = q.limit(limit).all()
+
+        def to_dict(r: Foodlog) -> Dict[str, Any]:
+            created = None
+            try:
+                created = r.createdon.strftime("%Y-%m-%d %H:%M:%S") if r.createdon else None
+            except Exception:
+                created = None
+            return {
+                # generic keys used by tools + raw fields for safety
+                "entry_datetime": created or (r.activitydate or ""),
+                "activitydate": r.activitydate,
+                "food_type": getattr(r, "type", None),
+                "description": getattr(r, "description", None),
+                "image_url": getattr(r, "url", None),
+                "url": getattr(r, "url", None),
+                "patient_id": getattr(r, "patient_id", None),
             }
-            for result in results
-        ]
+
+        return [to_dict(r) for r in rows]

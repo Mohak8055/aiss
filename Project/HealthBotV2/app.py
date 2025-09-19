@@ -87,14 +87,20 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Import and include API routes
 try:
     from api.auth_routes import router as auth_router
     app.include_router(auth_router)
+
     from api.chat_routes import router as chat_router
     app.include_router(chat_router)
+
     from api.document_routes import router as document_router
     app.include_router(document_router)
+
+    # ⬇️ ADD THESE TWO LINES
+    from api.image_routes import router as image_router
+    app.include_router(image_router)
+
     logger.info("✅ API routes loaded successfully")
 except ImportError as e:
     logger.error(f"❌ Failed to load API routes: {e}")

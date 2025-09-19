@@ -7,7 +7,7 @@ Main database manager and connection handling - Service Layer Pattern
 import os
 import logging
 from datetime import datetime, date, timedelta
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterable
 from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker, relationship, Session
@@ -47,38 +47,37 @@ SessionLocal = None
 
 def get_database_url() -> str:
     """Get MySQL database URL"""
-    host = os.getenv("MYSQL_HOST", "revival-lambda.cna6ec2coiy2.ap-south-1.rds.amazonaws.com")
-    port = os.getenv("MYSQL_PORT", "3306") 
+    host = os.getenv("MYSQL_HOST", "revival365ai-db.chisukc6ague.ap-south-1.rds.amazonaws.com")
+    port = os.getenv("MYSQL_PORT", "3306")
     database = os.getenv("MYSQL_DATABASE", "revival")
     username = os.getenv("MYSQL_USERNAME", "admin")
-    password = os.getenv("MYSQL_PASSWORD", "Stixis)(*7")
-    
+    password = os.getenv("MYSQL_PASSWORD", "MvqHf1QnpP1F1UqT57Pr")
     return f"mysql+pymysql://{username}:{password}@{host}:{port}/{database}"
 
 def init_database():
     """Initialize database connection and create tables"""
     global engine, SessionLocal
-    
+
     try:
         database_url = get_database_url()
         logger.info(f"Connecting to database: {database_url}")
-        
+
         # Create engine for MySQL with connection pooling
         engine = create_engine(
-            database_url, 
+            database_url,
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=10,
             pool_recycle=3600,
             pool_timeout=30
         )
-        
+
         # Create session factory
         SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-        
+
         logger.info("Database connection established successfully")
         return True
-        
+
     except Exception as e:
         logger.error(f"Database initialization failed: {e}")
         return False
@@ -87,12 +86,69 @@ def get_db() -> Session:
     """Get database session"""
     if SessionLocal is None:
         raise Exception("Database not initialized. Call init_database() first.")
-    
     return SessionLocal()
+
+# -------------------------
+# Helpers for stable order
+# -------------------------
+
+def _row_dt(row: Dict[str, Any]) -> Optional[datetime]:
+    """
+    Extract a datetime from common keys in food log rows.
+    Accepts: 'entry_datetime', 'activitydate', 'created_at', 'timestamp'
+    """
+    if not isinstance(row, dict):
+        return None
+    candidates = [
+        row.get("entry_datetime"),
+        row.get("activitydate"),
+        row.get("created_at"),
+        row.get("timestamp"),
+    ]
+    for val in candidates:
+        if not val:
+            continue
+        # If already a datetime
+        if isinstance(val, datetime):
+            return val
+        # If a date string or datetime string
+        if isinstance(val, (str,)):
+            s = val.strip()
+            # Try common formats (be permissive but deterministic)
+            for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M",
+                        "%Y-%m-%d", "%d-%m-%Y %H:%M:%S", "%d-%m-%Y",
+                        "%Y/%m/%d %H:%M:%S", "%Y/%m/%d"):
+                try:
+                    dt = datetime.strptime(s, fmt)
+                    # If only date, assume start of day for sorting
+                    return dt
+                except Exception:
+                    continue
+    return None
+
+def _stable_sort_food_entries(
+    entries: Iterable[Dict[str, Any]],
+    newest_first: bool
+) -> List[Dict[str, Any]]:
+    """
+    Deterministically sort food log entries by datetime with id tie-breaker.
+    """
+    items = list(entries or [])
+    def keyer(e: Dict[str, Any]):
+        dt = _row_dt(e) or datetime.min
+        # tie-breaker on 'id' if available, otherwise 0
+        rid = e.get("id")
+        try:
+            rid = int(rid) if rid is not None else 0
+        except Exception:
+            rid = 0
+        return (dt, rid)
+    items.sort(key=keyer, reverse=newest_first)
+    return items
 
 class DatabaseManager:
     """Main database manager using service layer pattern"""
-    
+
     def __init__(self, auto_init: bool = True):
         self.db = None
         self._medical_readings_service = None
@@ -101,23 +157,23 @@ class DatabaseManager:
         self._protocol_service = None
         self._plan_service = None
         self._patient_doctor_mapping_service = None
-        
+
         if auto_init:
             try:
                 init_database()
             except Exception as e:
                 logger.warning(f"Database initialization failed: {e}")
-        
+
         self._get_session()
-    
+
     def __enter__(self):
         """Context manager entry"""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit - ensures cleanup"""
         self.close()
-    
+
     def close(self):
         """Close database session"""
         if self.db:
@@ -134,33 +190,33 @@ class DatabaseManager:
                 self._foodlog_service = None
                 self._protocol_service = None
                 self._plan_service = None
-    
+
     def _get_session(self):
         """Get a fresh database session"""
         try:
             if SessionLocal is None:
                 raise Exception("Database not initialized. Call init_database() first.")
-            
+
             # Close existing session if any
             if self.db:
                 try:
                     self.db.close()
                 except Exception:
                     pass
-            
+
             # Create new session
             self.db = SessionLocal()
-            
+
             # Reset services to use new session
             self._medical_readings_service = None
             self._medications_service = None
             self._foodlog_service = None
             self._protocol_service = None
-            
+
         except Exception as e:
             logger.error(f"Failed to create database session: {e}")
             self.db = None
-    
+
     def _handle_db_error(self, error):
         """Handle database errors by rolling back and creating new session"""
         logger.error(f"Database error: {error}")
@@ -172,7 +228,7 @@ class DatabaseManager:
                 pass
             # Create fresh session
             self._get_session()
-    
+
     # Service property accessors
     @property
     def medical_readings_service(self) -> Optional[MedicalReadingsService]:
@@ -180,42 +236,42 @@ class DatabaseManager:
         if not self._medical_readings_service and self.db:
             self._medical_readings_service = MedicalReadingsService(self.db)
         return self._medical_readings_service
-    
+
     @property
     def medications_service(self) -> Optional[MedicationsService]:
         """Get medications service instance"""
         if not self._medications_service and self.db:
             self._medications_service = MedicationsService(self.db)
         return self._medications_service
-    
+
     @property
     def foodlog_service(self) -> Optional[FoodlogService]:
         """Get foodlog service instance"""
         if not self._foodlog_service and self.db:
             self._foodlog_service = FoodlogService(self.db)
         return self._foodlog_service
-    
+
     @property
     def protocol_service(self) -> Optional[ProtocolService]:
         """Get protocol service instance"""
         if not self._protocol_service and self.db:
             self._protocol_service = ProtocolService(self.db)
         return self._protocol_service
-    
+
     @property
     def plan_service(self) -> Optional[PlanService]:
         """Get plan service instance"""
         if not self._plan_service and self.db:
             self._plan_service = PlanService(self.db)
         return self._plan_service
-    
+
     @property
     def patient_doctor_mapping_service(self) -> Optional[PatientDoctorMappingService]:
         """Get patient doctor mapping service instance"""
         if not self._patient_doctor_mapping_service and self.db:
             self._patient_doctor_mapping_service = PatientDoctorMappingService(self.db)
         return self._patient_doctor_mapping_service
-    
+
     # Delegate methods to services
     def get_specific_reading_value(self, **kwargs) -> Dict[str, Any]:
         """Delegate to medical readings service"""
@@ -223,7 +279,7 @@ class DatabaseManager:
             self._get_session()
         if not self.db:
             return {"error": "Database connection failed"}
-        
+
         try:
             service = self.medical_readings_service
             if not service:
@@ -232,14 +288,14 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return {"error": f"Database error: {str(e)}"}
-    
+
     def get_high_low_readings(self, **kwargs) -> Dict[str, Any]:
         """Delegate to medical readings service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return {"error": "Database connection failed"}
-        
+
         try:
             service = self.medical_readings_service
             if not service:
@@ -248,14 +304,14 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return {"error": f"Database error: {str(e)}"}
-    
+
     def get_medications(self, **kwargs) -> Dict[str, Any]:
         """Delegate to medications service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return {"error": "Database connection failed"}
-        
+
         try:
             service = self.medications_service
             if not service:
@@ -264,30 +320,52 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return {"error": f"Database error: {str(e)}"}
-    
-    def get_foodlog(self, **kwargs) -> Dict[str, Any]:
-        """Delegate to foodlog service"""
+
+    def get_foodlog(self, **kwargs) -> Dict[str, Any] | List[Dict[str, Any]]:
+        """
+        Delegate to foodlog service, then enforce deterministic ordering so the
+        agent's 'first item' selection is stable across restarts.
+        """
         if not self.db:
             self._get_session()
         if not self.db:
             return {"error": "Database connection failed"}
-        
+
         try:
             service = self.foodlog_service
             if not service:
                 return {"error": "Foodlog service unavailable"}
-            return service.get_foodlog(**kwargs)
+
+            result = service.get_foodlog(**kwargs)
+
+            # --- NEW: stable ordering for deterministic answers ---
+            try:
+                exact_date = kwargs.get("exact_date")
+                meal_type = kwargs.get("meal_type")
+                newest_first = bool(exact_date and meal_type)  # for a specific day+meal, pick the latest
+                if isinstance(result, list):
+                    result = _stable_sort_food_entries(result, newest_first=newest_first)
+                elif isinstance(result, dict):
+                    # Support both shapes: either a list directly or inside 'entries'
+                    if isinstance(result.get("entries"), list):
+                        result["entries"] = _stable_sort_food_entries(result["entries"], newest_first=newest_first)
+            except Exception as sort_err:
+                logger.warning(f"Foodlog stable sort skipped: {sort_err}")
+            # --- END NEW ---
+
+            return result
+
         except Exception as e:
             self._handle_db_error(e)
             return {"error": f"Database error: {str(e)}"}
-    
+
     def get_protocols(self, **kwargs) -> Dict[str, Any]:
         """Delegate to protocol service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return {"error": "Database connection failed"}
-        
+
         try:
             service = self.protocol_service
             if not service:
@@ -296,14 +374,14 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return {"error": f"Database error: {str(e)}"}
-    
+
     def get_user_plans(self, **kwargs) -> List[Dict[str, Any]]:
         """Delegate to plan service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return []
-        
+
         try:
             service = self.plan_service
             if not service:
@@ -312,14 +390,14 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return []
-    
+
     def get_current_active_plan(self, **kwargs) -> Optional[Dict[str, Any]]:
         """Delegate to plan service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return None
-        
+
         try:
             service = self.plan_service
             if not service:
@@ -328,14 +406,14 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return None
-    
+
     def get_plan_usage_summary(self, **kwargs) -> Dict[str, Any]:
         """Delegate to plan service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return {"error": "Database connection failed"}
-        
+
         try:
             service = self.plan_service
             if not service:
@@ -344,32 +422,32 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return {"error": f"Database error: {str(e)}"}
-    
+
     def get_users(self, user_id: Optional[int] = None, mobile_number: Optional[str] = None, email: Optional[str] = None) -> List:
         """Get users with filters"""
         if not self.db:
             self._get_session()
-            
+
         if not self.db:
             return []
-            
+
         try:
             query = self.db.query(Users)
-            
+
             if user_id:
                 query = query.filter(Users.id == user_id)
             if mobile_number:
                 query = query.filter(Users.mobile_number == mobile_number)
             if email:
                 query = query.filter(Users.email.ilike(f"%{email}%"))
-            
+
             result = query.all()
             return result
-            
+
         except Exception as e:
             self._handle_db_error(e)
             return []
-    
+
     # Patient Doctor Mapping delegate methods
     def get_patient_doctors(self, **kwargs) -> List[Dict[str, Any]]:
         """Delegate to patient doctor mapping service"""
@@ -377,7 +455,7 @@ class DatabaseManager:
             self._get_session()
         if not self.db:
             return []
-        
+
         try:
             service = self.patient_doctor_mapping_service
             if service:
@@ -386,14 +464,14 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return []
-    
+
     def get_doctor_patients(self, **kwargs) -> List[Dict[str, Any]]:
         """Delegate to patient doctor mapping service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return []
-        
+
         try:
             service = self.patient_doctor_mapping_service
             if service:
@@ -402,14 +480,14 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return []
-    
+
     def get_primary_doctor(self, **kwargs) -> Optional[Dict[str, Any]]:
         """Delegate to patient doctor mapping service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return None
-        
+
         try:
             service = self.patient_doctor_mapping_service
             if service:
@@ -418,14 +496,14 @@ class DatabaseManager:
         except Exception as e:
             self._handle_db_error(e)
             return None
-    
+
     def check_doctor_patient_access(self, **kwargs) -> bool:
         """Delegate to patient doctor mapping service"""
         if not self.db:
             self._get_session()
         if not self.db:
             return False
-        
+
         try:
             service = self.patient_doctor_mapping_service
             if service:
